@@ -1,0 +1,450 @@
+import numpy as np
+from numpy.linalg import norm, pinv, inv
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+import pybullet as p
+import pybullet_data
+import time
+
+#Συνάρτηση για την δημιουργία πίνακα μετασχηματισμού.
+def T(R, t):
+    T = np.eye(4)
+    T[:3, :3], T[:3, 3] = R, t 
+    return T
+
+# Συνάρτηση περιστροφής κατά τον άξονα x.
+def Rx(deg):
+    theta = np.deg2rad(deg)
+    c, s = np.cos(theta), np.sin(theta)
+    Rx = np.array([[1, 0, 0],
+                   [0, c, -s],
+                   [0, s, c]])
+    return Rx
+
+# Σχεδιασμός ενός τοπικού συστήματος συντεταγμένων
+#def coords(ax, T, name="", scale =12):
+#    p = T[:3,3]
+#    x, y, z = T[:3,0]*scale, T[:3,1]*scale, T[:3,2]*scale
+#    ax.quiver(p[0], p[1], p[2], x[0], x[1], x[2], color = 'r')
+#    ax.quiver(p[0], p[1], p[2], y[0], y[1], y[2], color = 'g')
+#    ax.quiver(p[0], p[1], p[2], z[0], z[1], z[2], color = 'b')
+#    ax.text(p[0], p[1], p[2], name, fontsize=10, color = 'k')
+    
+#Σχεδιασμός ενός παραλληλεπίπεδου
+#def box(ax, origin, size, color='red', alpha=0.3):
+#    X, Y, Z = origin
+#    dx, dy, dz = size
+#    vertices = np.array([
+#        [X, Y, Z],
+#        [X+dx, Y, Z],
+#        [X+dx, Y+dy, Z],
+#        [X, Y+dy, Z],
+#        [X, Y, Z+dz],
+#        [X+dx, Y, Z+dz],
+#        [X+dx, Y+dy, Z+dz],
+#        [X, Y+dy, Z+dz]
+#    ])
+#    faces = [[vertices[j] for j in [0,1,2,3]],
+#             [vertices[j] for j in [4,5,6,7]],
+#             [vertices[j] for j in [0,1,5,4]],
+#             [vertices[j] for j in [2,3,7,6]],
+#             [vertices[j] for j in [1,2,6,5]],
+#             [vertices[j] for j in [0,3,7,4]]]
+#    ax.add_collection3d(Poly3DCollection(faces, facecolors=color, alpha=alpha, linewidths=0.5))
+
+#Σχεδιασμός ενός περιστραμμένου κύβου
+#def cube(ax, center, side, R=np.eye(3), color='blue', alpha=0.5):
+#    half = side / 2
+#    local_vertices = np.array([
+#        [-half,-half,-half],
+#        [ half,-half,-half],
+#        [ half, half,-half],
+#        [-half, half,-half],
+#        [-half,-half, half],
+#        [ half,-half, half],
+#        [ half, half, half],
+#        [-half, half, half]
+#    ])
+#    vertices = (R @ local_vertices.T).T + np.array(center)
+#    faces = [[vertices[j] for j in [0,1,2,3]],
+#             [vertices[j] for j in [4,5,6,7]],
+#             [vertices[j] for j in [0,1,5,4]],
+#             [vertices[j] for j in [2,3,7,6]],
+#             [vertices[j] for j in [1,2,6,5]],
+#             [vertices[j] for j in [0,3,7,4]]]
+#    ax.add_collection3d(Poly3DCollection(faces, facecolors=color, alpha=alpha, linewidths=0.5))
+
+#Yπολογισμός του αντισυμμετρικού πίνακα
+def skew(r):
+    T = np.array([
+        [0, -r[2], r[1]],
+        [r[2], 0, -r[0]],
+        [-r[1], r[0], 0]
+    ])
+    return T
+
+#Δημιουργία Frames
+Twbox  = T(np.eye(3), np.array([0.025, 0.025, 0.10]))
+Twhole = T(Rx(45.0), np.array([0.025, 0.09995, 0.09995]))
+Twcube = T(np.eye(3) , np.array([0.125, 0.175, 0.025]))
+Twrobot = T(np.eye(3), np.array([0.125, 0, 0]))
+Twbase = T(np.eye(3), np.array([0, 0, 0]))
+Teefcube = T(np.array([[1,0,0],[0,-1,0],[0,0,-1]]), np.array([0, 0, 0.025]))
+Twcubenext = T(Rx(45.0), np.array([0.10, 0.09995, 0.09995]))
+Twcubein = T(Rx(45.0), np.array([0.025, 0.09995, 0.09995]))
+
+#Εμφάνιση των Transformation matrices
+np.set_printoptions(formatter={'float': '{: 0.3f}'.format}, suppress=True)
+print("Transormation matrices:\n")
+print("Transformation matrix of box with respect to world frame:\n", Twbox)
+print("Transformation matrix of hole with respect to world frame:\n", Twhole)
+print("Transformation matrix of cube with respect to world frame:\n", Twcube)
+print("Transformation matrix of base frame of the robot with respect to world frame:\n", Twrobot)
+print("Transformation matrix of cube with respect to end effector:\n", Teefcube)
+print("Transformation matrix of cube next to the hole with respect to world frame:\n", Twcubenext)
+print("Transformation matrix of cube inside the hole with respect to world frame:\n", Twcubein)
+
+joint_limits = np.deg2rad([
+    (-160, 160),
+    (-70, 115),
+    (-170, 170),
+    (-113, 75),
+    (-170, 170),
+    (-115, 115),
+    (-180, 180)
+])
+
+#Μετατροπή Twist σε πίνακα 4x4
+def TwistToMatrix(V):
+    w = V[0:3]
+    v = V[3:6]
+    return np.block([[skew(w), v.reshape(3,1)], [np.zeros((1,3)), np.array([[1]])]])
+
+#Δημιουργία εκθετικού πίνακα
+def MatrixExp(v_hat, theta):
+    w_hat = v_hat[:3, :3]
+    v = v_hat[:3, 3]
+    if np.allclose(w_hat,0):
+        R = np.eye(3)
+        p = v * theta
+    else:
+        R = np.eye(3) + np.sin(theta) * w_hat + (1 - np.cos(theta)) * (w_hat @ w_hat)
+        p = (np.eye(3) * theta + (1 - np.cos(theta)) * w_hat + (theta - np.sin(theta)) * (w_hat @ w_hat)) @ v
+    return np.block([[R, p.reshape(3,1)], [np.zeros((1,3)), np.array([[1]])]])
+
+#Δημιουργία λογαριθμικού πίνακα
+def MatrixLog(T):
+    R = T[:3,:3]
+    p = T[:3,3]
+    if np.allclose(R, np.eye(3)):
+        return np.concatenate([np.zeros(3), p])
+    else:
+        tr = np.trace(R)
+        theta = np.arccos(np.clip((tr - 1)/2, -1.0, 1.0))
+        if np.abs(theta) < 1e-10:
+            w = np.zeros(3)
+        else:
+            w = (1/(2*np.sin(theta))) * np.array([R[2,1]-R[1,2], R[0,2]-R[2,0], R[1,0]-R[0,1]])
+        W = skew(w)
+        if np.abs(theta) < 1e-10:
+            v = p.copy()
+        else:
+            G_inv = (np.eye(3)/theta - 0.5*W + (1/theta - 0.5/np.tan(theta/2)) * (W @ W))
+            v = G_inv @ p
+        return np.concatenate([w * theta, v * theta])
+    
+#Υπολογισμός Adjoint πίνακα
+def Ad(T):
+    R = T[:3,:3]
+    p = T[:3,3]
+    AdT = np.zeros((6,6))
+    AdT[:3,:3] = R
+    AdT[3:,:3] = skew(p) @ R
+    AdT[3:,3:] = R
+    return AdT    
+
+#Υπολογισμός των forward kinematics
+def ForwardKinematics(vlist, thetas, M):
+    T = np.eye(4)
+    for i in range(len(thetas)):
+        S_hat = TwistToMatrix(vlist[:,i])
+        T = T @ MatrixExp(S_hat, thetas[i])
+    return T @ M
+
+#Υπολογισμός Space Jacobian
+def SpaceJacobian(vlist, thetas):
+    n = len(thetas)
+    Js = np.zeros((6,n))
+    T = np.eye(4)
+    for i in range(n):
+        Js[:,i] = Ad(T) @ vlist[:,i]
+        S_hat = TwistToMatrix(vlist[:,i])
+        T = T @ MatrixExp(S_hat, thetas[i])
+    return Js
+
+#Υπολογισμός Inverse Kinematics
+def InvKinNewton(vlist, M, dest, theta0, tol=1e-4, max_iter=3000, lamb=0.1, max_step=0.5):
+    theta = theta0.copy().astype(float)
+    for it in range(max_iter):
+        T_current = ForwardKinematics(vlist, theta, M)
+        T_error = inv(T_current) @ dest
+        V_b = MatrixLog(T_error)
+        error_norm = norm(V_b)
+        
+        if error_norm < tol:
+            print(f"Converged in {it} iterations, error {error_norm:.3e}")
+            return theta
+        
+        Js = SpaceJacobian(vlist, theta)
+        Jb = Ad(inv(T_current)) @ Js
+        JJt = Jb @ Jb.T
+        lamI = (lamb**2) * np.eye(6)
+        inv_term = np.linalg.inv(JJt + lamI)
+        dtheta = Jb.T @ (inv_term @ V_b)
+        
+        if norm(dtheta) > max_step:
+            dtheta = dtheta * (max_step / norm(dtheta))
+        theta = theta + dtheta
+
+        for j in range(len(theta)):
+            theta[j] = np.clip(theta[j],
+            joint_limits[j][0],
+            joint_limits[j][1])
+
+    print("Max iterations reached, final error:", error_norm)
+    return theta
+
+#Transformation matrices των joints σε σχέση με το world frame
+Twj1 = T(np.eye(3), np.array([0.125, 0, 0.1695]))
+Twj2 = T(Rx(-90.0), np.array([0.125, 0, 0.1695]))
+Twj3 = T(np.eye(3), np.array([0.125, 0, 0.285]))
+Twj4 = T(Rx(90), np.array([0.125, 0, 0.285]))
+Twj5 = T(np.eye(3), np.array([0.125, 0, 0.41283]))
+Twj6 = T(Rx(90.0), np.array([0.125, 0, 0.41283]))
+Twj7 = T(np.eye(3), np.array([0.125, 0, 0.47881]))
+
+#Twists των αρθρώσεων του ρομπότ
+#Vj1 = np.array([[0], [0], [1], [0], [0], [0]])
+#Vj2 = np.array([[0], [1], [0], [0], [-0.1695], [0]])
+#Vj3 = np.array([[0], [0], [1], [0], [0], [0]])
+#Vj4 = np.array([[0], [-1], [0], [0.285], [0], [0]])
+#Vj5 = np.array([[0], [0], [1], [0], [0], [0]])
+#Vj6 = np.array([[0], [-1], [0], [0.4125], [0], [0]])
+#Vj7 = np.array([[0], [0], [1], [0], [0], [0]])
+
+
+
+#Screw axis του ρομπότ
+#Vzeroconfig = np.column_stack([Vj1, Vj2, Vj3, Vj4, Vj5, Vj6, Vj7])
+
+#zero-configuration του ρομπότ
+M = np.array([
+    [1,0,0,0],
+    [0,1,0,0],
+    [0,0,1,0.48],
+    [0,0,0,1]
+])
+
+#Προορισμός για τον end effector ώστε να πιάσει τον κύβο
+dest1 = np.array([
+    [1, 0, 0, 0],
+    [0, -1, 0, 0.175],
+    [0, 0, -1, 0.05],
+    [0, 0, 0, 1]
+])
+
+#Προορισμός για τον end effector ώστε ο κύβος να είναι λίγο πριν την τρύπα.
+dest2 = np.array([
+    [1, 0, 0, -2.5],
+    [0, 0.7071, -0.7071, 9.995],
+    [0, 0.7071, 0.7071, -9.995],
+    [0, 0, 0, 1]
+])
+
+#Αρχική εκτίμηση
+theta0 = np.array([0.1]*7)
+
+#Οπτικοποιήση ρομπότ
+physicsClient = p.connect(p.GUI)
+p.setGravity(0, 0, 0)
+p.setAdditionalSearchPath(pybullet_data.getDataPath())
+p.setGravity(0, 0, -9.81)
+planeId = p.loadURDF("plane.urdf")
+robotStartPos = [0.125, 0, 0]
+robotStartOrientation = p.getQuaternionFromEuler([0, 0, 0])
+robotId = p.loadURDF("C:/Users/apapa/rob/urdf/myarm_300_pi.urdf", robotStartPos, robotStartOrientation, useFixedBase=True)
+numJoints = p.getNumJoints(robotId)
+joint_indices = []
+for i in range(numJoints):
+    info = p.getJointInfo(robotId, i)
+    jointType = info[2]
+    if jointType == p.JOINT_REVOLUTE:
+        joint_indices.append(i)
+
+def get_screw_axes(robotId, joint_indices):
+    S_list = []
+    for joint_idx in joint_indices:
+        # Λήψη πληροφοριών άρθρωσης
+        info = p.getJointInfo(robotId, joint_idx)
+        joint_axis_local = np.array(info[11])
+        
+        # Λήψη κατάστασης του link (World Frame)
+        # Χρησιμοποιούμε το link state για να βρούμε την τρέχουσα θέση q και τον άξονα ω
+        state = p.getLinkState(robotId, joint_idx, computeForwardKinematics=True)
+        pos_world = np.array(state[4]) # World link frame position (q)
+        orn_world = state[5]           # World link frame orientation
+        
+        # Μετατροπή του τοπικού άξονα (jointAxis) στο World Frame
+        rot_matrix = np.reshape(p.getMatrixFromQuaternion(orn_world), (3, 3))
+        omega = rot_matrix @ joint_axis_local
+        
+        # Υπολογισμός v = -omega x q
+        v = np.cross(-omega, pos_world)
+        
+        S = np.concatenate([omega, v])
+        S_list.append(S)
+        
+    return np.column_stack(S_list)
+
+# Χρήση στον κώδικά σας:
+Vzeroconfig = get_screw_axes(robotId, joint_indices)
+
+#Λύση για την πρώτη περίπτωση με χρ΄ήση Inverse Kinematics
+solution1 = InvKinNewton(Vzeroconfig, M, dest1, theta0, tol=1e-6, max_iter=2000, lamb=0.05, max_step=0.02)
+final1 = np.round(solution1,2)
+print("\nΤελική θέση(rad):", final1)
+print("\nΤελική θέση (deg):", np.round(np.degrees(final1),2))
+
+#Επαλήθευση με forward kinematics
+T_final1 = ForwardKinematics(Vzeroconfig, solution1, M)
+print("\nΕπαλήθευση:\n", np.round(T_final1,2))
+print("\nDesired:\n", dest1)
+err1 = norm(T_final1 - dest1)
+print(f"\nFrobenius error: {err1:.6e}")
+
+#Λύση για την δεύτερη περίπτωση με χρ΄ήση Inverse Kinematics
+solution2 = InvKinNewton(Vzeroconfig, M, dest2, theta0, tol=1e-6, max_iter=2000, lamb=0.05, max_step=0.02)
+final2 = np.round(solution2,2)
+print("\nΤελική θέση(rad):", final2)
+print("\nΤελική θέση (deg):", np.round(np.degrees(final2),4))
+
+#Επαλήθευση με forward kinematics
+T_final2 = ForwardKinematics(Vzeroconfig, solution2, M)
+print("\nΕπαλήθευση:\n", np.round(T_final2,4))
+print("\nDesired:\n", dest2)
+err2 = norm(T_final2 - dest2)
+print(f"\nFrobenius error: {err2:.6e}")
+
+#Εμφάνιση
+#fig = plt.figure(figsize=(10,8))
+#ax = fig.add_subplot(111, projection='3d')
+
+# Πλέγμα για να φαίνεται ο χώρος
+#ax.set_xlabel('X(cm)')
+#ax.set_ylabel('Y (cm)')
+#ax.set_zlabel('Z (cm)')
+#ax.set_xlim(-10, 50)
+#ax.set_ylim(-10, 50)
+#ax.set_zlim(0, 50)
+#ax.view_init(elev=25, azim=-60)
+
+#Δημιουργία κύβου
+cube_size = 0.025 
+cube_collision = p.createCollisionShape(p.GEOM_BOX, halfExtents=[cube_size, cube_size, cube_size])
+cube_orient = p.getQuaternionFromEuler([0, 0, 0])
+cube_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[cube_size, cube_size, cube_size], rgbaColor=[0.5, 0, 0.4, 0.7])
+cubeId = p.createMultiBody(baseMass=0.1,baseCollisionShapeIndex=cube_collision,baseVisualShapeIndex=cube_visual,basePosition=[0.125, 0.175, 0.025])
+
+# 1. Παράμετροι για το παραλληλεπίπεδο
+hole_pos = [0.025, 0.09995, 0.09995]
+hole_orient = p.getQuaternionFromEuler([np.deg2rad(45), 0, 0])
+hole_size = 0.025 
+
+# 2. Δημιουργία της περιστρεφόμενης τρύπας (μπλε κύβος)
+hole_collision = p.createCollisionShape(p.GEOM_BOX, halfExtents=[hole_size, hole_size, hole_size])
+hole_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=[hole_size, hole_size, hole_size], rgbaColor=[0.5, 0.4, 0.8, 0.7])
+
+holeId = p.createMultiBody(
+    baseMass=0.1,
+    baseCollisionShapeIndex=hole_collision,
+    baseVisualShapeIndex=hole_visual,
+    basePosition=hole_pos,
+    baseOrientation=hole_orient
+)
+
+# 3. Δημιουργία του σταθερού παραλληλεπιπέδου (Τοίχωμα)
+def create_fixed_wall_with_rotated_hole(position):
+    color = [0.8, 0.6, 0.8, 0.7]
+    W = 0.1    
+    H = 0.1    
+    T = 0.025 
+    gap = hole_size * np.sqrt(2) 
+
+    # Πάνω κομμάτι
+    p.createMultiBody(0, 
+        p.createCollisionShape(p.GEOM_BOX, halfExtents=[T, W, (H-gap)/2]),
+        p.createVisualShape(p.GEOM_BOX, halfExtents=[T, W, (H-gap)/2], rgbaColor=color),
+        basePosition=[position[0], position[1], position[2] + (gap + (H-gap)/2)])
+
+    # Κάτω κομμάτι
+    p.createMultiBody(0, 
+        p.createCollisionShape(p.GEOM_BOX, halfExtents=[T, W, (H-gap)/2]),
+        p.createVisualShape(p.GEOM_BOX, halfExtents=[T, W, (H-gap)/2], rgbaColor=color),
+        basePosition=[position[0], position[1], position[2] - (gap + (H-gap)/2)])
+
+    # Αριστερό κομμάτι (ενδιάμεσο ύψος)
+    p.createMultiBody(0, 
+        p.createCollisionShape(p.GEOM_BOX, halfExtents=[T, (W-gap)/2, gap]),
+        p.createVisualShape(p.GEOM_BOX, halfExtents=[T, (W-gap)/2, gap], rgbaColor=color),
+        basePosition=[position[0], position[1] - (gap + (W-gap)/2), position[2]])
+
+    # Δεξί κομμάτι (ενδιάμεσο ύψος)
+    p.createMultiBody(0, 
+        p.createCollisionShape(p.GEOM_BOX, halfExtents=[T, (W-gap)/2, gap]),
+        p.createVisualShape(p.GEOM_BOX, halfExtents=[T, (W-gap)/2, gap], rgbaColor=color),
+        basePosition=[position[0], position[1] + (gap + (W-gap)/2), position[2]])
+
+create_fixed_wall_with_rotated_hole(hole_pos)
+
+#Οπτικοποίηση των frames
+def draw_frame(pos, orient_euler):
+    orient_quat = p.getQuaternionFromEuler(orient_euler)
+    p.addUserDebugLine(pos, [pos[0]+0.1, pos[1], pos[2]], [1,0,0])
+    p.addUserDebugLine(pos, [pos[0], pos[1]+0.1, pos[2]], [0,1,0])
+
+for i, joint_idx in enumerate(joint_indices):
+    p.setJointMotorControl2(
+        robotId,
+        joint_idx,
+        p.POSITION_CONTROL,
+        targetPosition=solution1[i]
+    )
+
+try:
+    while True:
+        p.stepSimulation()
+        time.sleep(1./240.)
+except KeyboardInterrupt:
+    p.disconnect()
+
+
+# Σχεδίαση αντικειμένων
+#box(ax, (0,0,0), (5, 20, 20), 'plum', 0.5)
+#cube(ax, (2.5,9.995,9.995),5, Rx(45.0) , 'black', 0.8)                          
+#cube(ax, (12.5,17.5,2.5), 5, np.eye(3), 'navy', 0.3)
+
+#Σχεδιασμός Frames
+#coords(ax, np.eye(4), 'W', scale=5)
+#coords(ax, Twhole, 'Hole', scale=5)
+#coords(ax, Twcubein, 'Cube', scale=5)
+#coords(ax,Twrobot , 'Robot', scale=17)
+#coords(ax,Twj1 , 'Joint1', scale=17)
+#coords(ax,Twj2 , 'Joint2', scale=17)
+#coords(ax,Twj3 , 'Joint3', scale=12)
+#coords(ax,Twj4 , 'Joint4', scale=12)
+#coords(ax,Twj5 , 'Joint5', scale=13)
+#coords(ax,Twj6 , 'Joint6', scale=13)
+#coords(ax,Twj7 , 'Joint7', scale=7)
+
+#plt.legend()
+#plt.show()
