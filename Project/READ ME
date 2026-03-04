@@ -1,0 +1,1 @@
+This homework focuses on solving a robotic manipulation task using the Elephant myArm 300 Pi, a 7-DOF manipulator. The objective is to calculate transformation matrices, solve forward and inverse kinematics, and determine joint positions for grasping a cube and inserting it into a hole in a box.
